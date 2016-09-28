@@ -1,0 +1,683 @@
+﻿<!DOCTYPE html> 
+<html>
+<head>
+<title>TTTgame</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<link rel="stylesheet" href="stylesheets/ttt.css">
+
+<script language="javascript" src="socket.io.js"></script>
+<script language="javascript" src="jquery-1.3.2.js"></script>
+<script language="javascript" src="five.js"></script>
+<script language="javascript">
+//修改基本策略：用户进入房间后,前两个用户算idx，第三个用户为observer,观察者posIdx == 2
+$(function(){
+	var MSG_ALL  = 0;//发送到所有用户
+	var MSG_TO   = 1;//发送指定用户
+	var MSG_ROOM = 2;//向指定桌发送消息
+	
+	var STAT_NORMAL = 0;//无状态
+	var STAT_READY  = 1;//准备
+	var STAT_START  = 2;//游戏中
+	var STAT_OB     = 3;//旁观者
+	
+	var COLOR_BLACK = 1;//黑色圈
+	var COLOR_WHITE = 2;//白色叉
+	
+	var g_Connected = false;
+	var g_Host = "127.0.0.1";
+	var g_Port = 8080;
+	var g_Info = {
+		"id" : 0,             //本桌
+		"nickname" : "",
+		"status" : 0,
+		"roomIdx" : -1,
+		"posIdx" : -1,
+		//"observerIdx" : －1,  //旁观者idx数组 by wangjia，进入房间后的观察者就是这个id
+		"curgrid" : [0]       //当前可用的3*3单元格,可能是一个，也可能是多个，范围从0到8 需要高亮显示 ,初始化时为0 by wj
+	};
+	var app = new FiveChess(g_Host, g_Port);
+	var defaultNickname = "请输入昵称";
+	 
+	 /*
+	 登陆成功server 发送
+			this.emit("login", { //发送给客户端登录成功命令
+				"ret"  : 1, 
+				"info" : GetUserInfo(sid),
+				"list" : GetUserList(),
+				"room" : GetRoomList()
+			});
+	 */
+
+	 //add by wangjia 20160917
+	 //邓志飞的nextdraw命令实现，以及高亮方格内，棋子allowdraw的实现
+	 
+	 //从gridId获取到小格子的起始坐标
+	 function getXYfromGridId(gridId){
+	 	var data = {};
+	 	if(gridId == 0){
+	 		data.x = 0;
+	 		data.y = 0;
+	 	}
+	 	else if(gridId == 1){
+	 		data.x = 3;
+	 		data.y = 0;
+	 	}
+	 	else if(gridId == 2){
+	 		data.x = 6;
+	 		data.y = 0;
+	 	}
+	 	else if(gridId == 3){
+	 		data.x = 0;
+	 		data.y = 3;
+	 	}
+	 	else if(gridId == 4){
+	 		data.x = 3;
+	 		data.y = 3;
+	 	}
+	 	else if(gridId == 5){
+	 		data.x = 6;
+	 		data.y = 3;
+	 	}
+	 	else if(gridId == 6){
+	 		data.x = 0;
+	 		data.y = 6;
+	 	}
+	 	else if(gridId == 7){
+	 		data.x = 3;
+	 		data.y = 6;
+	 	}
+	 	else if(gridId == 8){
+	 		data.x = 6;
+	 		data.y = 6;
+	 	}
+	 	else{
+	 		data.x = 0;
+	 		data.y = 0;
+	 	}
+	 	return data;
+	 }
+
+	 //通过小格子的序号id from 0 to 8 比较给定的x,y坐标是否属于此小格子
+	 function checkValidxOfxy(gridId,x,y){
+	 	if(gridId == 0){
+	 		if((x<=2) && (y<=2)){
+	 			return true;
+	 		}
+	 	}
+	 	else if(gridId == 1){
+	 		if((x > 2) && (x <=5 ) && (y <= 2)){
+	 			return true;
+	 		}
+	    }
+	    else if(gridId == 2){
+	 		if((x > 5) && (x <= 8) && (y <= 2)){
+	 			return true;
+	 		}
+	    }
+	    else if(gridId == 3){
+	 		if((x <= 2) && (y > 2) && (y <= 5)){
+	 			return true;
+	 		}
+	    }
+	    else if(gridId == 4){
+	 		if((x > 2) && (x <=5) && (y > 2) && (y <= 5)){
+	 			return true;
+	 		}
+	    }
+	    else if(gridId == 5){
+	 		if((x > 5) && (x <= 8) && (y > 2) && (y <= 5)){
+	 			return true;
+	 		}
+	    }
+	    else if(gridId == 6){
+	 		if((x <= 2) && (y > 5) && (y <= 8)){
+	 			return true;
+	 		}
+	    }
+	    else if(gridId == 7){
+	 		if((x > 2) && (x <= 5) && (y > 5) && (y <= 8)){
+	 			return true;
+	 		}
+	    }
+	    else if(gridId == 8){
+	 		if((x > 5) && (x <= 8) && (y > 5) && (y <= 8)){
+	 			return true;
+	 		}
+	    }
+	    else{
+	    	return false;
+	    }
+	}
+
+	 //end add by wangjia
+	app.on("login", function(data){//登陆从server返回login消息，接受者就是单个登录者的socket
+		if(data.ret == 1){ //登录成功
+			$("#dlgBg").remove();
+			$("#login").remove();
+			g_Info.id       = data.info.id;     //登录后此id就保存到g_Info,id是什么？应该是socket.id
+			console.log("id is "+data.info.id);
+			g_Info.nickname = data.info.nickname;
+			g_Info.status   = data.info.status; //此时应该无状态即STAT_NORMAL
+			initRoomList(data.room); //roomlist
+			initUserList(data.list); //userlist
+		}else{
+			alert("登陆失败");
+		}
+	}).on("close", function(data){//前端收到server的退出程序响应的处理,大厅玩家显示的变化
+		$("#user-" + data.id).remove(); //TODO:需要验证：前端的变化，只涉及到data.id为玩家的情况，要是旁观者应该没关系才对
+		
+		//本房间有人退出，需要对房间内所有人广播
+		//wangjia 改造ing：对于旁观者的退出，不能改变现在两个玩家的状态
+		if(data.roomIdx == g_Info.roomIdx){
+			removeRoom(data.posIdx);//前端用，要是posIdx==2的情况已经在removeRoom内改造完毕
+			if(g_Info.status == STAT_START){//前端用，房间内有人退出时的状态改变
+				if((data.posIdx == 1)||(data.posIdx == 2))
+					g_Info.status = STAT_NORMAL;
+				updateRoom(g_Info.posIdx, g_Info);
+			}
+		}
+		
+		//大厅有人退出，要是此人在桌上，需要处理桌面的图标变化
+		if(data.roomIdx != -1){
+			var name = $('#room-' + data.roomIdx + '-name-' + data.posIdx);
+			var icon = $('#room-' + data.roomIdx + '-icon-' + data.posIdx);
+			name.html('');
+			icon.removeClass('yes').addClass('no');
+		}
+	}).on("join", function(data){//新用户加入大厅
+		if(g_Info.id != data.id){
+			$("#list-box").append(makeHtmlUserList(data));
+		}
+	}).on("joinRoom", function(data){//任何用户加入房间，这里需要改造
+	    /* 改造建设中 by wangjia */
+	    if((data.posIdx == 0)||(data.posIdx ==1)){
+			var name = $('#room-' + data.roomIdx + '-name-' + data.posIdx);
+			var icon = $('#room-' + data.roomIdx + '-icon-' + data.posIdx);
+			name.html(data.nickname);
+			icon.removeClass('no').addClass('yes');
+		}
+		
+		//若收到的join信息是自己，首先加入到旁观者list中 by wangjia
+		//收到的joinroom的data成员 
+		//		"roomIdx"  : data.roomIdx,
+		//		"posIdx"   : data.posIdx,
+		//		"nickname" : m_Connections[sid].nickname,
+		//		"id"       : sid,
+		//		"observerIdx" : [] //房间已有的存量玩家
+		//add until...
+		
+
+
+		//end add by wangjia
+		if(data.id == g_Info.id){ //传入的data.id和已经保存的id一致，则。。。
+			g_Info.roomIdx = data.roomIdx;
+			g_Info.posIdx  = data.posIdx;
+			g_Info.status  = STAT_NORMAL;
+			//g_Info.observerIdx = data.observerIdx;
+		}else if(data.roomIdx == g_Info.roomIdx){ //我在的房间，又有人加入的情况
+			//有人加入本房间
+			data.status = STAT_NORMAL;
+			updateRoom(data.posIdx, data);
+		}
+	}).on("ready", function(data){//准备
+		//本房间有人准备
+		if(data.roomIdx == g_Info.roomIdx){
+			updateRoom(data.posIdx, data);
+		}
+		//大厅有人准备
+		var stat = (data.status == STAT_NORMAL ? 
+					"无状态" : (data.status == STAT_READY ? "已准备" : "游戏中"));
+		if(data.status == STAT_OB)
+			stat = "旁观中";
+		$("#user-" + data.id + " span").html(stat);
+	}).on("roomInfo", function(data){//获取房间信息
+		initRoom(data[0], data[1]);
+	}).on("start", function(data){//开始游戏
+		g_Info.status = STAT_START;
+		g_Info.color  = data.color;
+		g_Info.allowDraw = data.allowDraw;
+		if(g_Info.allowDraw){
+			$("div.room_chess").css("cursor", "pointer");
+		}else{
+			$("div.room_chess").css("cursor", "no-drop");
+		}
+		$("div.room_chess div").remove();//清除棋子
+		$("#game_ready").val("游戏中...");
+		alert("开始游戏啦...");
+	}).on("startInfo", function(data){//有游戏开始了
+		$("#room-" + data.roomIdx).addClass("room_item_start");
+		$("#user-" + data.player1 + " span").html("游戏中");
+		$("#user-" + data.player2 + " span").html("游戏中");
+	}).on("overInfo", function(data){//游戏结束了
+		$("#room-" + data.roomIdx).removeClass("room_item_start");
+		$("#user-" + data.player1 + " span").html("无状态");
+		$("#user-" + data.player2 + " span").html("无状态");
+		if(data.roomIdx == g_Info.roomIdx){
+			//更新房间另一个成员的状态
+			var p = (data.player1 == g_Info.id ? 2 : 1);
+			$("#room-p" + p + "-status").html("未准备");
+		}
+	}).on("leaveRoom", function(data){//离开房间
+		var name = $('#room-' + data.roomIdx + '-name-' + data.posIdx);
+		var icon = $('#room-' + data.roomIdx + '-icon-' + data.posIdx);
+		name.html('');
+		icon.removeClass('yes').addClass('no');
+		if(data.id == g_Info.id){//更新自己的信息
+			g_Info.roomIdx = -1;
+			g_Info.posIdx  = -1;
+			changeTag("room_list");
+		}else if(data.roomIdx == g_Info.roomIdx){//本房间有人退出
+			removeRoom(data.posIdx);
+		}
+	}).on("joinRoomError", function(data){//加入房间失败
+		alert("加入房间失败");
+	}).on("message", function(data){//接受消息
+		if(data.type == MSG_ALL){
+			$("#msg-content").append("<p>" + data.nickname + ": " + data.body + "</p>");
+		}else if(data.type == MSG_TO){
+			$("#msg-content").append("<p style=\"color:#339933\">" + data.nickname + ": " + data.body + "</p>");
+		}else if(data.type == MSG_ROOM){
+			$("#room-msg-content").append("<p>" + data.nickname + ": " + data.body + "</p>");
+		}
+	}).on("drawChess", function(data){//收到落子事件和界面处理。
+		//data.x data.y是棋子的坐标，左上角开始的XY坐标系；
+		//left  top  是棋子的像素位置
+		//+5可以自己调整，来确保棋子的相对像素位置在TTT棋盘的格子中心
+		//wangjia 20160918,nextdraw的设计
+		g_Info.curgrid = data.nextdrawgridid;
+		var left = data.x * 55 + 20;
+		var top  = data.y * 55 + 20;
+		console.log('data.x is ' + data.x);
+		console.log('left is ' + left);
+		console.log('data.y is ' + data.y);
+		console.log('top is ' + top);
+		var css  = (data.color == COLOR_BLACK ? "black" : "white");
+		var html = '<div id="chess-' + data.x + '-' + data.y + '" style="left:' + left + 'px;top:' + top + 'px" class="' + css + '"></div>';
+		$("div.room_chess").append(html);
+		if($("div.room_chess .cur").length == 0){
+			$("div.room_chess").append('<div class="cur"></div>');
+		}
+		$("div.room_chess .cur").css({//落子后的十字标记
+			left : left,
+			top : top
+		});
+		//add by wangjia 20160918 下面是高亮部分
+		
+		//if($("div.room_chess .block").length == 0){
+			//demo 如下
+			/*
+			$("div.room_chess").append('<div id = "block1" style = "left: 20px;top:20px" class="block"></div>');
+			$("div.room_chess").append('<div id = "block2" style = "left: 185px;top:185px" class="block"></div>');
+			*/
+		//}
+		
+		$("div.room_chess .block").remove();
+		for(var i = 0; i < data.nextdrawgridid.length;i++){
+			var tempdata = {} ;
+			tempdata.x = getXYfromGridId(data.nextdrawgridid[i]).x;
+			tempdata.y = getXYfromGridId(data.nextdrawgridid[i]).y;
+			var xxx = 20+55*parseInt(tempdata.x);
+			var yyy = 20+55*parseInt(tempdata.y);
+
+			console.log("ssss " + xxx + "ttttt " + yyy);
+			var html2 = '<div id = "block-'+ tempdata.x + '-' + tempdata.y + '" ＋ style = "left:'+ xxx+'px;top:+'+yyy+'px"  class="block"></div>';
+
+			$("div.room_chess").append(html2);
+			
+		}
+		//end add by wangjia
+		if(data.id == g_Info.id){ //收到的落子id是用户自己，则进行有效性判断
+			g_Info.allowDraw = false;
+			$("div.room_chess").css("cursor", "no-drop");  //有效性判断，无效区域
+		}else{
+			g_Info.allowDraw = true;
+			$("div.room_chess").css("cursor", "pointer");  //有效性判断，有效区域
+		}	
+	}).on("smallwiner", function(data){//小棋盘胜利
+		//显示胜利的logo
+		// 切换到下个小棋盘
+
+	}).on("smallloser", function(data){//小棋盘失败
+		//显示对方胜利的logo
+        // 切换到下个小棋盘
+	}).on("smalldrawer", function(data){//小棋盘战平
+		//
+
+	}).on("nextdraw", function(data){//下一步的情况，按邓志飞的情况修改
+
+
+	}).on("winer", function(data){//胜利
+		g_Info.status = STAT_NORMAL;
+		g_Info.allowDraw = false;
+		updateRoom(g_Info.posIdx, g_Info);
+		alert("你真厉害，居然赢了这个家伙，再接再厉！");
+	}).on("drawer", function(data){//平局
+		g_Info.status = STAT_NORMAL;
+		g_Info.allowDraw = false;
+		updateRoom(g_Info.posIdx, g_Info);
+		alert("平局，大家平分秋色！");
+	}).on("loser", function(data){//失败
+		g_Info.status = STAT_NORMAL;
+		g_Info.allowDraw = false;
+		updateRoom(g_Info.posIdx, g_Info);
+		alert("你输了！");
+	});
+	
+	//初始化登陆框
+	$("#dlgBg").css({
+		width : $(document).width(),
+		height : $(document).height()
+	});
+	$("#login").css({
+		left : ($(document).width() - $("#login").width()) / 2,
+		top : 100
+	});
+	
+	//昵称输入框事件
+	$('#nickname').click(function(){
+		$(this).val('');
+	}).blur(function(){
+		if($(this).val() == ''){
+			$(this).val(defaultNickname);
+		}
+	}).val(defaultNickname);
+	
+	//登陆
+	$("#loginBtn").click(function(){
+		//链接服务器
+		if(app.connect() == false){
+			alert("error: " + app.getError());
+			return false;
+		}
+		
+		//登陆
+		var nickname = $("#nickname").val();
+		if(!nickname || nickname == defaultNickname){
+			alert("请输入昵称");
+			$("#nickname").val('').focus();
+			return ;
+		}
+		app.login(nickname);
+	});
+	
+	//加入房间,原来的实现是通过点击来判断0或者1
+	//若都为2，有个问题，就是一个旁观者退出了，其他旁观者还在，一个2会有问题
+	//但是用动态的id，怎么保证多个用户能够知道对方存在？
+	//现在先加入一个观察者来规避上述问题
+	$("#room-box .player").live("click", function(){
+		var roomIdx = $(this).closest('.room_item').attr('value');
+		var posIdx = $(this).attr('value');
+		if($("#room-" + roomIdx + "-icon-" + posIdx).hasClass("yes")){
+			//return ;
+			posIdx = 2; //改造by wangjia 旁观者进入的idx都为2
+		}
+		
+		if(g_Info.status == STAT_START){
+			alert("你正在游戏中，不能加入其它房间");
+			return ;
+		}		
+		app.joinRoom(roomIdx, posIdx);
+	});
+	
+	//发送消息
+	$("#msg-button").click(function(){
+		var msg = $("#msg-input").val();
+		if(msg == ""){
+			return ;
+		}
+		app.sendAllMsg(msg);
+		$("#msg-input").val('');
+	});
+	
+	//发送消息到房间内
+	$("#room-msg-button").click(function(){
+		var msg = $("#room-msg-input").val();
+		if(!msg){
+			return ;
+		}
+		app.sendRoomMsg(msg);
+		$("#room-msg-input").val("");
+	});
+	
+	//切换窗口
+	$("#tag a").click(function(){
+		var id = $(this).attr('href').substr(1);
+		if($(this).hasClass('on')){
+			return false;
+		}
+		
+		if(g_Info.roomIdx == -1){
+			alert("您还没有加入房间");
+			return false;
+		}
+		
+		changeTag(id);
+		return false;
+	});
+	
+	//落子后的websocket消息发送
+	$("div.room_chess").click(function(ev){ //用户自己落子后的处理
+		var pageX = ev.pageX;
+		console.log('pageX is '  + pageX);
+		var pageY = ev.pageY;
+		console.log('pageY is ' + pageY);
+		var x = parseInt((pageX - $(this).offset().left - 20) / 55);
+		var y = parseInt((pageY - $(this).offset().top - 20) / 55);
+		console.log('this.offset().left = ' + $(this).offset().left);
+		console.log('x,y is : x = ' + x  + ' y = ' + y);
+		var validflag = false;
+		for(var i = 0; i < g_Info.curgrid.length; i++){
+			if(checkValidxOfxy(g_Info.curgrid[i],x,y)){
+				validflag = true;
+				break;
+			}
+		}
+
+
+		if(g_Info.roomIdx == -1 || g_Info.status != STAT_START || 
+			$("#chess-" + x + '-' + y).length > 0 || g_Info.allowDraw == false ||
+			validflag == false)//add by wangjia 第三个条件是什么意思?? 意思是这里已经有一个棋子了，不能再发送drawChess
+		{
+			return;
+		}
+		
+		app.drawChess(g_Info.color, x, y);//界面绘制完成后通过app emit websocket消息
+	});
+	
+	//准备
+	$("#game_ready").click(function(){
+		if(g_Info.status == STAT_START){
+			return;
+		}
+		app.ready();
+	});
+	
+	//退出房间
+	$("#game_leave").click(function(){
+		if(g_Info.status == STAT_START){
+			alert("正在游戏中，你不能退出");
+			return ;
+		}
+		app.leaveRoom(g_Info.roomIdx);
+	});
+	
+	//切换
+	function changeTag(tag)
+	{
+		if(tag == "room_list"){
+			$("#room_list").show();
+			$("#tag_room_list").addClass("on");
+			$("#room").hide();
+			$("#tag_room").removeClass("on");
+		}else{
+			$("#room").show();
+			$("#tag_room").addClass("on");	
+			$("#room_list").hide();
+			$("#tag_room_list").removeClass("on");	
+		}
+	}
+	
+	//生成用户html,显示其他用户的大厅状态
+	function makeHtmlUserList(data)
+	{
+		var stat ;
+		if (data.status == STAT_READY)
+			stat = "已准备";
+		else if(data.status == STAT_START)
+			stat = "游戏中";
+		else if(data.status == STAT_OB)
+			stat = "旁观中";
+		else stat = "无状态";
+
+		var html = ('<li id="user-' + data.id + '"><span>' + stat + "</span>" + data.nickname + "</li>");
+		return html;
+	}
+	
+	//初始化用户列表
+	function initUserList(data)
+	{
+		var html = '';
+		for(var i = 0; i < data.length; i++){
+			html+= makeHtmlUserList(data[i]);
+		}
+		$("#list-box").html(html);	
+	}
+	
+	//初始化房间列表,data == Server. GetRoomList()  wangjia 改造ing，这里应该是大厅的显示，对旁观用户可以不用修改
+	function initRoomList(data)
+	{
+		var html = '';
+		for(var idx in data){
+			html+= '<div id="room-' + idx + '" value="' + idx + '" class="room_item">';
+			html+= '<div id="room-' + idx + '-name-1" class="player2">' + (data[idx][1] ? data[idx][1].nickname : "") + '</div>';
+			html+= '<div class="players">';
+			html+= '<div value="0" id="room-' + idx + '-icon-0" class="player icon1 ' + (data[idx][0] ? "yes" : "no") + '"></div>';
+			html+= '<div value="1" id="room-' + idx + '-icon-1" class="player icon2 ' + (data[idx][1] ? "yes" : "no") + '"></div>';
+			html+= '</div>';
+			html+= '<div id="room-' + idx + '-name-0" class="player1">' + (data[idx][0] ? data[idx][0].nickname : "") + '</div>';
+			html+= '<div class="roomnum">- ' + (parseInt(idx) + 1) + ' -</div>';
+			html+= '</div>';
+		}
+		$("#room-box").html(html);	
+	}
+	
+	//初始化房间 wangjia改造ing
+	function initRoom(player1, player2)
+	{
+		//清除消息和棋子
+		$("div.room_chess div").remove(); //这里也包括高亮区域的清除了
+		$("#room-msg-content p").remove();	
+
+
+		
+		//tag样式切换
+		changeTag("room");
+		
+		//玩家1
+		if(player1){
+			updateRoom(0, player1);
+		}else{
+			removeRoom(0);
+		}
+		
+		//玩家2
+		if(player2){
+			updateRoom(1, player2);
+		}else{
+			removeRoom(1);
+		}
+	}
+	
+	//更新房间人员 TODO:加入旁观者的显示变化
+	function updateRoom(posIdx, player)
+	{
+		if((posIdx == 0)||(posIdx ==1)){
+			var p = (posIdx == 0 ? 1 : 2);
+			var s = (player.status == STAT_NORMAL ? "未准备" : (player.status == STAT_READY ? "已准备" : "游戏中"));
+			$("#room-p" + p + "-nickname").html(player.nickname);
+			$("#room-p" + p + "-status").html(s);
+			$("#room-p" + p + "-img").html('<img src="./images/yes_player.gif">');
+			if(g_Info.id == player.id){
+				var b = (player.status == STAT_NORMAL ? "准备" : (player.status == STAT_READY ? "取消" : "游戏中..."));
+				$("#game_ready").val(b);
+			}
+		}
+		else{
+				//
+		}
+	}
+	
+	//从本房间移除另一个成员,前端显示用，对旁观者没有影响
+	//mod by wangjia
+	function removeRoom(posIdx)
+	{
+		if((posIdx ==0) || (posIdx == 1)){
+			var p = (posIdx == 0 ? 1 : 2);
+			$("#room-p" + p + "-nickname").html('&nbsp;');
+			$("#room-p" + p + "-status").html("&nbsp;");
+			$("#room-p" + p + "-img").html('<img src="./images/no_player.gif">');	
+		}
+	}
+});
+</script>
+</head>
+<body>
+<div id="dlgBg"></div>
+<div id="login">
+	<h1>登陆</h1>
+	<div class="box">
+		<input type="text" id="nickname" maxlength="10" class="in">
+		<input type="button" id="loginBtn" class="go" value="加入游戏">
+	</div>
+</div>
+<div id="main">
+	<div id="tag" class="tag">
+		<a id="tag_room_list" href="#room_list" class="on">大厅</a>
+		<a id="tag_room" href="#room">房间</a>
+	</div>
+	<div style="display:none" id="room" class="room">
+		<div class="room_user">
+			<div class="u1">
+				<p id="room-p1-img"><img src="./images/no_player.gif"></p>
+				<p id="room-p1-nickname"></p>
+				<p id="room-p1-status"></p>
+			</div>
+			<div class="u2">
+				<p id="room-p2-nickname"></p>
+				<p id="room-p2-status"></p>	
+				<p id="room-p2-img"><img src="./images/no_player.gif"></p>	
+			</div>
+		</div>
+		<div class="room_chess">
+		</div>
+		<div class="room_message">
+			<div class="room_button">
+				<input type="button" id="game_ready" class="btn" value="准备">
+				<input type="button" id="game_leave" class="btn" value="退出">
+			</div>
+			<div id="room-msg-content" class="content"></div>
+			<div class="input">
+				<input id="room-msg-input" style="width:175px;margin:5px 0 0 8px" type="text" id="input">
+				<input id="room-msg-button" style="width:50px;margin:5px 0 0 0" type="button" value="发送">
+			</div>		
+		</div>
+	</div>
+	<div id="room_list"  class="room_all">
+		<div class="room_left">
+			<div id="room-box" class="room_list"></div>
+		</div>
+		<div class="room_right">
+			<div id="list-box" class="list"></div>
+			<div class="message">
+				<div id="msg-content" class="content"></div>
+				<div class="input">
+					<select style="width:50px;margin:5px 0 0 8px"><option value="">所有人</option></select>
+					<input id="msg-input" style="width:125px;margin:5px 0 0 0" type="text" id="input">
+					<input id="msg-button" style="width:50px;margin:5px 0 0 0" type="button" value="发送">
+				</div>
+			</div>
+		</div>
+	</div>
+</div>
+</body>
+</html>
